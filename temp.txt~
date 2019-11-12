@@ -1,0 +1,16 @@
+module stuff (i, q
+);
+
+input i;
+ouput q;
+initial 
+begin
+q = 1'b0
+end
+
+always @  (posedge clk or negedge reset)
+begin
+q = 1'b0
+end
+
+endmodule
