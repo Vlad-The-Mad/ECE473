@@ -1,7 +1,8 @@
-PRG            =lab1_code
-OBJ            = $(PRG).o hd44780.o
+PRG            =uart_rxtx
+#PRG            =adc_skel
+OBJ            = $(PRG).o hd44780.o uart_functions.o
 #new
-SRCS            = $(PRG).c hd44780.c
+SRCS            = $(PRG).c hd44780.c uart_functions.c
 
 MCU_TARGET     = atmega128
 OPTIMIZE       = -O2    # options are 1, 2, 3, s

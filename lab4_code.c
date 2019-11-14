@@ -88,6 +88,7 @@ uint8_t chk_buttons() {
 //takes an array of 16-bit binary values and places the appropriate equivalent hr:min
 //decimal time segment code in the array segment_data for display.                       
 //array is loaded at exit as:  |digit3|digit2|colon|digit1|digit0|
+//***********************************************************************************
 void min_hr(volatile uint16_t time_array[3]) {
 	uint16_t temp_hr = time_array[2];
 	uint16_t temp_min = time_array[1];
@@ -139,7 +140,6 @@ void spi_init(void) {
 //                           init_tcnt0                                                                                                               
 //Initalize tcnt0 counter for interrupt to trigger every 0.25 ms
 //***********************************************************************                                                                             
- 
 void init_tcnt0(){                                                                                                                                    
   ASSR  |=  (1<<AS0);                //run off external 32khz osc (TOSC)                                                                              
   //enable interrupts for normal mode, overflow
@@ -151,6 +151,25 @@ void init_tcnt0(){
 }                                                                                                                                                     
 
 //***********************************************************************                                                                             
+//                           init_tcnt1
+//***********************************************************************                                                                             
+void init_tcnt1(){                                                                                                                                    
+//  DDRB   |= (1<<PB7) | (1<<PB5);   //set port B bit five and seven as outputs
+//setup TCNT1                                                                                                                                         
+  TCCR1A = 0x00;                 //outputs disabled
+  TCCR1B = ((1<<WGM12) | (1<<CS11));   //use OCR1A as source for TOP, use clk/8                                                                       
+  TCCR1C = 0x00;                          //no forced compare                                                                                         
+  OCR1A = 4000; //top value
+}                                                                                                                                                     
+
+//***********************************************************************                                                                             
+//                           init_tcnt3
+//***********************************************************************                                                                             
+void init_tcnt3(){                                                                                                                                    
+	
+}                                                                                                                                                     
+
+//***********************************************************************                                                                             
 //                           init_general
 //Initalizes coded values for display on seven seg, alarm values to ensure good
 //starting logic in state machine, global interrupt
@@ -158,12 +177,15 @@ void init_tcnt0(){
 void init_general() {
 	
 	DDRD |= (1 << PD4); //make PORTD3 a ground for the encoders
+	DDRC |= ((1 << PC3) | (1 << PC2)); //enable output for alarm
 	PORTD &= ~(1 << PD4);
 	//NOTE: PB3 has some sort of error.  when I set it to act as
 	// an output, it prevents me from using PB2.  
 	//set port bits 4-7 B as outputs for LED decoder
 	DDRB |= ((1 << PB2) | (1 << PB4) | (1 << PB5) | (1 << PB6) | (1 << PB7));
 	PORTB &= ~(1<<7);    // set PB7 low so it acts like gnd
+	PORTC &= ~(1<<PC3);    // set PRC1 high so it supplies voltage to the amplifier
+	PORTC &= ~(1<<PC2);    // set PRC1 high so it supplies voltage to the amplifier
 
 	//set pins E 6 and 7 to output
 	//crontrols the register load and shift out commands	
@@ -195,7 +217,7 @@ void init_general() {
 	time_array_secminhr[1] = (__TIME__[3]-48)*10 + (__TIME__[4]-48);
 	time_array_secminhr[0] = (__TIME__[6]-48)*10 + (__TIME__[7]-48);
 	ALM[2] = (__TIME__[0]-48)*10 + (__TIME__[1]-48);
-	ALM[1] = (__TIME__[3]-48)*10 + (__TIME__[4]-48);
+	ALM[1] = (__TIME__[3]-48)*10 + (__TIME__[4]-48)+1;
 	//ALM[2] = 8; //alarm hr for compare
 	//ALM[1] = 0; //alarm minutes for compare
 	ALM[0] = 0; //alarm enabled bit.  initially off
@@ -205,12 +227,17 @@ void init_general() {
 void alarm_routine(uint8_t option) {
 	switch(option) {
 	//turn off
-		case 0: alarm_ringing = 0; break;
+		case 0: alarm_ringing = 0; 
+			TIMSK &= ~(1<<OCIE1A); //turns off interrupt, 
+			PORTC &= 0b11110111;//ensures the output to speaker is off
+			break;
 	//turn on
 		case 1: alarm_ringing = 1; 
 			ALM[0] = 1; 
 			clear_display();
 			string2lcd(" Ringing"); 
+			PORTC |= (1 << PC3);//ensures the output to speaker is on
+			TIMSK |= (1<<OCIE1A); //enable interrupt
 			break;
 	//check against snooze
 		case 2: 		if(snooze_end[0] == time_array_secminhr[0] 
@@ -234,14 +261,14 @@ void increment_timer() {
 		case 130: time_array_secminhr[0]++; 
 			  segment_data[2] = dec_to_7seg[10];
 			  timer_ticks = 0;
+			  if (time_array_secminhr[0] == 60) { //at the end of a min, increment min
 			  //this check is once a second (would be 1/min for non-debugging) to see if alarm should start,
 			  //not whether it should continue after a snooze command
+				  time_array_secminhr[1]++;
+				  time_array_secminhr[0] = 0; //reset seconds to 0
 			  if (ALM[0] == 1 && ALM[1] == time_array_secminhr[1] && ALM[2] == time_array_secminhr[2] && !snoozed) {
 				  alarm_routine(1);
 			  }
-			  if (time_array_secminhr[0] == 60) { //at the end of a min, increment min
-				  time_array_secminhr[1]++;
-				  time_array_secminhr[0] = 0; //reset seconds to 0
 				  //only check to see if alarm should trigger on the minute transition
 				  if (time_array_secminhr[1] == 60) {//at the end of a hr, increment min
 					  time_array_secminhr[2]++;
@@ -346,10 +373,28 @@ void snooze_set() {
 	snooze_end[0] = time_array_secminhr[0]+10;
 	snooze_end[1] = time_array_secminhr[1];
 	snooze_end[2] = time_array_secminhr[2];
+	if (snooze_end[0] >= 60) { //takes care of edge cases where snooze time would be impossible (near the minute)
+		snooze_end[0] -= 60;
+		snooze_end[1] += 1;
+		if (snooze_end[1] >= 60) {
+			snooze_end[1] -= 60;
+			snooze_end[2] += 1;
+			if (snooze_end[2] == 25) {
+				snooze_end[2] = 0;
+			}
+		}
+	}
 	clear_display();
-	string2lcd("Snoozed");
+	string2lcd(" Snoozed");
 	alarm_routine(0);
 	snoozed = 1;
+}
+//***********************************************************************                                                                             
+//                     ISR for timer counter one
+//Flips output bit, sending waveform to the amplifier circuit.
+//***********************************************************************                                                                             
+ISR(TIMER1_COMPA_vect) {
+	PORTC ^= 0b00000100;
 }
 //***********************************************************************                                                                             
 //                     ISR for timer counter zero                                                                                                     
@@ -370,7 +415,7 @@ ISR(TIMER0_COMP_vect){
 	//send the armed message on the transition between it being not-armed and ALM[0] being set to 1
 	//these should only happen when actually disabled, not just snoozed
 	if (ALM[0] == 0 && (add_mode & 0x01) && !snoozed) 
-		string2lcd("ARMED");
+		string2lcd(" ARMED");
 	//disabled armed message on the transition between it being armed and ALM[0] being set to 0
 	else if (ALM[0] == 1 && !(add_mode & 0x01) && !snoozed)
 		clear_display();
@@ -417,7 +462,8 @@ ISR(TIMER0_COMP_vect){
 int main() {
 	//set up interrupt vector
 	init_general(); //initalize all other widely used items
-	init_tcnt0();   //initalize timer counter zero
+	init_tcnt0();   //initalize timer counter zero (checking inputs)
+	init_tcnt1();   //initalize timer counter one (alarm tone generation)
 	spi_init();   //initalize spi 
 	lcd_init();
 	sei();          //enable global interrupts
@@ -441,7 +487,7 @@ int main() {
                 for (digit; digit < 5; digit++) {                                                                                                     
                         PORTB &= 0x0f;                                                                         
                         PORTB |= dec_set[digit];                                                                         
-			if (ALM[0] == 1) //turning on the periods is the 7-seg "armed" indication
+			if (ALM[0] == 1 && alarm_ringing == 0) //turning on the periods is the 7-seg "armed" indication
 				PORTA = segment_data[digit] & 0b01111111;
 			else 
 				PORTA = segment_data[digit];
