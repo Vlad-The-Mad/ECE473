@@ -50,6 +50,8 @@ volatile uint16_t snooze_end[3];
 volatile uint16_t ALM[3]; //make ALM 3 to match the prototype for the min_hr function
 volatile uint8_t alarm_ringing; //tells whether alarm is going off at any point
 volatile uint8_t snoozed;
+uint16_t adc_result;     //holds adc result
+uint8_t brightness;
 
 
 //******************************************************************************
@@ -138,16 +140,16 @@ void spi_init(void) {
 
 //***********************************************************************                                                                             
 //                           init_tcnt0                                                                                                               
-//Initalize tcnt0 counter for interrupt to trigger every 0.25 ms
+//Initalize tcnt0 counter for counting up
 //***********************************************************************                                                                             
 void init_tcnt0(){                                                                                                                                    
   ASSR  |=  (1<<AS0);                //run off external 32khz osc (TOSC)                                                                              
   //enable interrupts for normal mode, overflow
   //timer counter 0 setup, running off i/o clock
   TIMSK |= (1<<OCIE0);             //enable interrupts
-  TCCR0 |= ((1<<CS00));// | (1<<CS01));  //normal mode, prescale by 8
-  //with only one bit, no prescale, so should be giving interrupts every 31us????
-  OCR0 = 1; //32khz / 8 = 0.25 ms period
+  TCCR0 |= ((1<<CS00));//normal mode, no prescale
+  //with only one bit, no prescale
+  OCR0 = 1; //32,768 / 2^8 
 }                                                                                                                                                     
 
 //***********************************************************************                                                                             
@@ -163,12 +165,34 @@ void init_tcnt1(){
 }                                                                                                                                                     
 
 //***********************************************************************                                                                             
-//                           init_tcnt3
+//                           init_tcnt2
+//Initalize the timer 2 to fast pwm mode in order to change the brightness
+//of the 7 segment display
 //***********************************************************************                                                                             
-void init_tcnt3(){                                                                                                                                    
-	
+void init_tcnt2(){                                                                                                                                    
+  ASSR  |=  (1<<AS0);                //run off external 32khz osc (TOSC)
+  //enable interrupts for normal mode, overflow
+  //timer counter 0 setup, running off i/o clock
+  //TIMSK |= (1<<OCIE2);             //enable interrupts
+  TCCR2 |= ((1<<COM21) | (1<<CS20)  | (1<<WGM20)| (1<<WGM21));// fast pwm mode
+  //with only one bit, no prescale, so should be giving interrupts every 31us????
+  OCR2 = 100; // start with high brightness
 }                                                                                                                                                     
 
+//***********************************************************************                                                                             
+//                           adc_init
+//Initalize the ADC to get values from the CDS cell
+//***********************************************************************                                                                             
+void adc_init(){                                                                                                                     
+	//Initalize ADC and its ports                                                                                                           
+	DDRF  &= ~(_BV(DDF7)); //make port F bit 7 is ADC input                                                                       
+	PORTF &= ~(_BV(PF7));  //port F bit 7 pullups must be off
+	ADMUX = 0b01000111;//single-ended, input PORTF bit 7, right adjusted, 10 bits
+	ADCSRA = 0b10000111;//ADC enabled, don't start yet, single shot mode
+	//take these out when running actual code
+	DDRC  |= (1 << PC4);                                                                                                                     
+	PORTC |= (1 << PC4); 
+}                                                                                                                                                     
 //***********************************************************************                                                                             
 //                           init_general
 //Initalizes coded values for display on seven seg, alarm values to ensure good
@@ -224,6 +248,12 @@ void init_general() {
 	
 }
 
+//***********************************************************************                                                                             
+//                           alarm_routine
+// Changes the state of the alarm.  State one prevents the alarm from triiggering
+// State starts the alarm ringing
+// State 3 checks to see if it should ring, based on the snooze setting
+//***********************************************************************                                                                             
 void alarm_routine(uint8_t option) {
 	switch(option) {
 	//turn off
@@ -252,13 +282,23 @@ void alarm_routine(uint8_t option) {
 
 void increment_timer() {
 	timer_ticks++;
+	if (timer_ticks % 11 == 0) {
+		//check the adc, then use the value at the CDC cell to change the duty cycle of
+		//the 7 seg display
+		ADCSRA |= (1<<ADSC);//poke ADSC and start conversion                                                  
+			 while(bit_is_clear(ADCSRA,ADIF));//spin while interrupt flag not set
+			 ADCSRA |= (1<<ADIF);//its done, clear flag by writing a one
+			 adc_result = ADC;                      //read the ADC output as 16 bits
+			 brightness = (adc_result >> 1);
+			 OCR2 = brightness;
+	}
 	switch(timer_ticks){
 		//turn off the colin
 		case 70: segment_data[2] = dec_to_7seg[11];
 			 break;
 			 //perform the time check function lol
 			 //also turn on the colin
-		case 130: time_array_secminhr[0]++; 
+		case 128: time_array_secminhr[0]++; 
 			  segment_data[2] = dec_to_7seg[10];
 			  timer_ticks = 0;
 			  if (time_array_secminhr[0] == 60) { //at the end of a min, increment min
@@ -369,6 +409,10 @@ void alarm_set() {
 }
 
 
+//***********************************************************************                                                                             
+//                     snooze_set
+//sets a time 10 seconds from when its
+//***********************************************************************                                                                             
 void snooze_set() {
 	snooze_end[0] = time_array_secminhr[0]+10;
 	snooze_end[1] = time_array_secminhr[1];
@@ -394,7 +438,7 @@ void snooze_set() {
 //Flips output bit, sending waveform to the amplifier circuit.
 //***********************************************************************                                                                             
 ISR(TIMER1_COMPA_vect) {
-	PORTC ^= 0b00000100;
+	PORTC ^= 0b00001000;
 }
 //***********************************************************************                                                                             
 //                     ISR for timer counter zero                                                                                                     
@@ -406,6 +450,7 @@ ISR(TIMER0_COMP_vect){
 	PORTA = 0xff;                                                                                                                         
 	//enable tristate buffer for pushbutton switches                                                                                      
 	PORTB |= ((1 << PB4) | (1 << PB5) | (1 << PB6));                                                                                      
+	PORTB &= ~(1 << PB0);
 	//now check each button and increment the count as needed                                                                             
 	//XOR so that previously enabled states will be disabled by another button press
 	add_mode ^= chk_buttons();
@@ -464,8 +509,10 @@ int main() {
 	init_general(); //initalize all other widely used items
 	init_tcnt0();   //initalize timer counter zero (checking inputs)
 	init_tcnt1();   //initalize timer counter one (alarm tone generation)
+	init_tcnt2();   //initalize timer counter two (PWM for LED brightness)
 	spi_init();   //initalize spi 
 	lcd_init();
+	adc_init();
 	sei();          //enable global interrupts
         uint8_t digit;                                                                                                                                
         uint8_t dec_set[5];                                                                                                                           
@@ -485,7 +532,8 @@ int main() {
                 //send PORTB the digit to display                                                                                                     
                 //iterate, turning on each digit / led array
                 for (digit; digit < 5; digit++) {                                                                                                     
-                        PORTB &= 0x0f;                                                                         
+                        //PORTB &= 0x0f;                                                                         
+                        PORTB &= 0b10001111;                                                                         
                         PORTB |= dec_set[digit];                                                                         
 			if (ALM[0] == 1 && alarm_ringing == 0) //turning on the periods is the 7-seg "armed" indication
 				PORTA = segment_data[digit] & 0b01111111;

@@ -1,5 +1,5 @@
-PRG            =uart_rxtx
-#PRG            =adc_skel
+PRG            =lab4_code
+#PRG            =dim
 OBJ            = $(PRG).o hd44780.o uart_functions.o
 #new
 SRCS            = $(PRG).c hd44780.c uart_functions.c
